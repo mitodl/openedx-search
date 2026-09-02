@@ -22,12 +22,18 @@ between them.
 * **Forum search** is served by ``openedx/forum``, which carries its own
   ``es.py``, ``meilisearch.py`` and ``typesense.py`` under ``forum/search/``.
 * **Notes** are served by ``edx-notes-api``, still on Elasticsearch 7 through
-  ``django-elasticsearch-dsl-drf``.
+  ``django-elasticsearch-dsl-drf``. It is the last consumer with no path off
+  Elasticsearch at all.
 
 Every one of those is a separate engine integration. An operator configures
 each independently, and adding an engine means implementing it up to four
 times. ``edx-search`` was meant to be the shared layer and is not: two of the
 four surfaces were built outside it on purpose.
+
+All four are in scope as adopters of this library. That is a stronger
+commitment than "a better abstraction exists," and it is what makes retiring
+Elasticsearch from the platform achievable rather than aspirational: a shared
+layer that leaves one consumer behind leaves the engine behind it running.
 
 How the platform arrived here
 =============================
@@ -114,27 +120,39 @@ should replace the other. It is that the platform should not oblige an operator
 to run two engines, and that the answer to the platform's high-availability
 question should not have to be a commercial licence.
 
-Both engines are Algolia-shaped
-===============================
+One engine family, three engines
+================================
 
 The django-haystack history is the strongest objection to anything proposed
 here, and it should be answered rather than waved past.
 
 Haystack failed trying to span engines with genuinely different models —
-Elasticsearch, Solr, Whoosh. Meilisearch and Typesense are not that. Both are
-Algolia-inspired document stores with closely parallel APIs, and Algolia itself
-is a third member of the same family. Abstracting across them is a narrow
-problem, not a general one. Elasticsearch and OpenSearch are the opposite case,
-and ``modular-learning#245`` already drew that line: the scope "would not try
-to stretch to cover more traditional search engines like Elasticsearch, since
+Elasticsearch, Solr, Whoosh. Typesense, Meilisearch and Algolia are not that.
+All three are Algolia-shaped document stores with closely parallel APIs:
+documents in, ``filter_by``-style predicates, facet distributions, per-request
+sort, and a locally-derived scoped credential that lets a browser query the
+engine directly. Abstracting across them is a narrow problem, not a general
+one. Elasticsearch and OpenSearch are the opposite case, and
+``modular-learning#245`` already drew that line: the scope "would not try to
+stretch to cover more traditional search engines like Elasticsearch, since
 doing so would be much more work and present performance concerns."
 
-That line is what keeps this from being haystack again. It also has a practical
-payoff: an abstraction designed against two engines from the start will take a
-third far more easily than one designed against a single engine and generalised
-afterwards. A future Algolia backend is a realistic prospect rather than a
-hypothetical: a code search for Algolia across the ``openedx`` org returns
-several hundred files, so parts of the estate already speak that dialect.
+That line is what keeps this from being haystack again.
+
+Algolia is a supported engine rather than a hypothetical future one, and
+designing against three from the start is cheaper than generalising to a third
+later. Parts of the estate already speak that dialect — a code search for
+Algolia across the ``openedx`` org returns several hundred files, and
+``edx-enterprise``'s catalog search is built on it.
+
+There is an apparent tension worth naming, because a reader will find it
+anyway: this ADR argues against depending on Meilisearch Enterprise Edition on
+licensing grounds, and then supports a commercial hosted service. The objection
+was never that commercial software should be unavailable as an option. It was
+that the platform's *only* answer to high availability should not be a
+commercial licence. Three supported engines, two of them self-hostable under
+open licences, is the opposite of that situation. An operator who wants a
+managed service can have one; an operator who cannot use one is not stranded.
 
 Feasibility, checked rather than assumed
 ========================================
@@ -225,8 +243,8 @@ is a synchronous write, verified searchable immediately after the call returns.
 This is context for ``openedx/openedx-platform#38993``, which is about the
 indexing bottleneck itself. It is not an argument that one engine is better.
 It is an argument that the API this repo exposes must not assume the
-Meilisearch task-queue shape, because for one of the two supported engines
-there is nothing to poll.
+Meilisearch task-queue shape, because one of the supported engines has no task
+queue at all and nothing to poll.
 
 Decision
 ********
@@ -236,46 +254,62 @@ platform, replacing ``edx-search`` and the private engine layer inside
 ``content/search``.
 
 1. **Use cases are registered, not hard-coded.** Studio content search, library
-   search, learner courseware search, course discovery and forum search each
-   register a use case that declares its document schema, index settings and
-   query shape. Adding a surface does not mean writing another engine
-   integration.
+   search, learner courseware search, course discovery, forum search and notes
+   search each register a use case that declares its document schema, index
+   settings and query shape. Adding a surface does not mean writing another
+   engine integration.
 
-2. **Meilisearch and Typesense are both first-class from day one.** Neither is
-   a backend bolted on after the interface has been shaped around the other.
-   Every use case must work on both, and CI must exercise both against real
-   servers rather than mocks.
+2. **All four existing consumers are in scope as adopters:**
+   ``content/search``, ``edx-search``'s consumers, ``openedx/forum`` and
+   ``edx-notes-api``. Each adopts on its own schedule, but none is designed
+   around. A shared layer that stops at three consumers does not retire the
+   fourth consumer's engine, which is the point of doing this at all.
 
-3. **We do not carry Elasticsearch or OpenSearch forward.** The scope is
-   Algolia-shaped engines, per ``modular-learning#245``. This is the boundary
-   that keeps the abstraction narrow enough to survive.
+3. **Three engines are supported: Typesense, Meilisearch and Algolia.** None is
+   a backend bolted on after the interface has been shaped around another.
+   Every use case must work on all three.
 
-4. **Filters are structured, not engine syntax.** Callers build filter terms;
+4. **We do not carry Elasticsearch or OpenSearch forward, and the goal is to
+   retire them from the platform entirely.** This is stronger than declaring
+   them out of scope. ``edx-search`` still ships an Elasticsearch engine and
+   ``edx-notes-api`` runs on nothing else, so retirement is a migration with a
+   defined end, not a deprecation notice. The engine-family boundary is what
+   makes the abstraction narrow enough to survive, per
+   ``modular-learning#245``.
+
+5. **Filters are structured, not engine syntax.** Callers build filter terms;
    backends render them. Today ``content/search`` leaks Meilisearch filter
    strings across app boundaries — ``modulestore_migrator``, for one, builds
    ``breadcrumbs.usage_key IN [...]`` by hand.
 
-5. **Index lifecycle is managed, and managed the same way for every use
+6. **Index lifecycle is managed, and managed the same way for every use
    case.** Creation, settings changes and rebuilds are versioned and applied
    like migrations, with one set of management commands across all use cases
    rather than per-surface commands that each know one engine.
    See ``openedx-platform#36868``.
 
-6. **Django stays out of the query path.** The browser queries the engine
+7. **Django stays out of the query path.** The browser queries the engine
    directly with a scoped, expiring credential minted locally. Proxying
    searches through the LMS to rewrite them would tie up worker threads for no
    gain. Minting scoped credentials is therefore part of the backend
    interface, not an engine-specific extra.
 
-7. **The frontend gets an engine-agnostic client seam, shipped with this
+8. **The frontend gets an engine-agnostic client seam, shipped with this
    library.** It must support multi-select hierarchical facets, which
    InstantSearch does not, and must not require per-engine branching through
    the Authoring MFE component tree.
 
-8. **The public API does not assume asynchronous indexing.** Writes are not
+9. **The public API does not assume asynchronous indexing.** Writes are not
    modelled as "enqueue then poll." Where an engine is genuinely asynchronous,
    that is the backend's concern; where it is synchronous, there is no queue
    to model.
+
+10. **Engine backends are verified against real engines, not mocks.**
+    Typesense and Meilisearch run as containers in CI. Algolia is SaaS-only
+    with no official local emulator, so it cannot be tested the same way; its
+    backend is verified by a credentials-gated suite against the real service,
+    and that asymmetry is recorded rather than papered over with a mock. See
+    Consequence 5.
 
 Consequences
 ************
@@ -293,25 +327,35 @@ Consequences
    loses its engine layer. Its ADR 0001's Decision 3 anticipated exactly this
    substitution.
 
-4. Two engines must be run in CI. Testing engine integrations against mocks is
-   how the forum Typesense backend shipped broken, so this is a requirement
-   rather than a nicety. ``content/search``'s ADR 0001 deferred this
-   deliberately — its Decision 5 was that "for the experiment, we won't use
-   Meilisearch during tests, but we expect to add that in the future if we move
-   forward with replacing Elasticsearch completely." This is that future.
+4. Real engines must run in CI. Testing engine integrations against mocks is
+   how the forum Typesense backend shipped broken on every search, so this is a
+   requirement rather than a nicety. ``content/search``'s ADR 0001 deferred
+   this deliberately — its Decision 5 was that "for the experiment, we won't
+   use Meilisearch during tests, but we expect to add that in the future if we
+   move forward with replacing Elasticsearch completely." This is that future.
 
-5. The Authoring MFE's ``search-manager`` is written against the raw
+5. Algolia cannot be held to the same verification standard, and this is a real
+   cost of supporting it. It is SaaS-only — there is no official on-premise or
+   local emulator, only community mocks, which are the exact failure mode
+   Consequence 4 exists to prevent. Its backend therefore needs a
+   credentials-gated suite against the real service, which will not run on
+   external contributors' pull requests. The practical effect is that Algolia
+   support carries a weaker guarantee than Typesense or Meilisearch, and it
+   should not be the reference implementation the interface is shaped around.
+   The two self-hostable engines are what keep the abstraction honest.
+
+6. The Authoring MFE's ``search-manager`` is written against the raw
    ``meilisearch`` JavaScript client. Reworking it behind a client seam is the
    single largest piece of work in this proposal — larger than the backend —
    and it needs its own plan.
 
-6. Result shapes differ and the seam must normalise them. Typesense returns
+7. Result shapes differ and the seam must normalise them. Typesense returns
    ``grouped_hits`` where Meilisearch's ``distinctAttribute`` returns flat
    ``hits``. Highlighting does not map exactly: Typesense decides per field
    whether to snippet and how much context to keep, where Meilisearch crops to
    a token count per attribute. Result cards need a visual pass, not a rename.
 
-7. Some engine differences cannot be abstracted away and must be surfaced
+8. Some engine differences cannot be abstracted away and must be surfaced
    honestly rather than papered over. Three found while building a Typesense
    schema for the Studio documents, recorded so they are not rediscovered
    painfully:
@@ -326,20 +370,49 @@ Consequences
      so anything that pages must take its page size from the backend rather
      than assume one.
 
+9. ``edx-notes-api`` is the migration with the least precedent, because it is
+   the only consumer moving off Elasticsearch rather than between
+   Algolia-shaped engines. Its document is small and maps cleanly — nine flat
+   fields, keyword search over ``text`` and ``tags``, filters on ``user``,
+   ``course_id`` and ``usage_id``, ordering by ``-updated`` — but three things
+   do not carry across, and the last of them is an API contract:
+
+   * It declares custom Elasticsearch analyzers. ``html_strip`` combines the
+     ``html_strip`` char filter with lowercase, stop-word and snowball
+     stemming filters; ``case_insensitive_keyword`` is a keyword tokenizer
+     plus lowercase. None of the three target engines exposes an analyzer
+     chain. Stripping HTML has to move to index time, and stemming behaviour
+     becomes the engine's rather than ours. Relevance will differ; this needs
+     acceptance, not a parity claim.
+   * ``number_of_fragments: 0`` means "highlight the whole field, do not
+     snippet." All three engines can be configured to return a fully
+     highlighted field, but none does so by default.
+   * The highlight markers ``{elasticsearch_highlight_start}`` and
+     ``{elasticsearch_highlight_end}`` are part of the response contract that
+     edxapp consumes. All three engines support custom highlight tags, so the
+     markers can be preserved exactly — but they have to be configured
+     deliberately, and the name will be a lie once Elasticsearch is gone.
+
 Open Questions
 **************
 
-* **Which engine is the default?** Both are first-class either way, and the
-  default determines what a new deployment gets rather than what is supported.
-* **Is Algolia a target?** Nothing here forecloses it, and the two-engine
-  design is what makes it cheap. Whether it is in scope for a first release is
-  a separate question.
-* **Does forum search move into this library, or keep its own backends and
-  adopt only the shared index tooling?** Its documents and permissions model
-  are unlike the others.
-* **What is the deprecation timeline for** ``edx-search``\ **, and for
-  Elasticsearch across the platform?** ``edx-notes-api`` is still on
-  Elasticsearch 7 and is not addressed by this proposal.
+* **Which engine is the default?** All three are supported either way; the
+  default only decides what a new deployment gets without choosing. Algolia is
+  not a candidate for it, since a default should not require an account with a
+  vendor.
+* **In what order do the four consumers adopt, and who does each migration?**
+  ``content/search`` has the most engine coupling and a frontend dependency;
+  ``edx-notes-api`` is the smallest surface but the only one moving off
+  Elasticsearch outright, and it is the one that ends the retirement.
+* **Does Algolia ship in the first release, or land once the two self-hostable
+  backends are proven?** It is a supported engine either way. Sequencing it
+  second costs nothing if the interface is designed against three from the
+  start, which is the part that has to happen up front.
+* **What happens to the Elasticsearch code paths during the transition?**
+  ``edx-search`` still ships an Elasticsearch engine and operators still run
+  it. Whether those are removed on a release boundary or kept until every
+  consumer has migrated is a release-management decision this ADR does not
+  make.
 
 Rejected Alternatives
 *********************
@@ -362,21 +435,21 @@ Rejected because it multiplies every engine decision by four, and because the
 forum Typesense backend demonstrates what happens to an integration that only
 one deployment exercises.
 
-Consolidate on Meilisearch and drop Typesense
-=============================================
+Support one engine only
+=======================
 
 The simplest possible answer, and the one that requires no abstraction at all.
-Rejected because it makes the platform's high-availability story depend on a
-BUSL-1.1 licence, and because that is the same failure mode the move off
-Elasticsearch was meant to avoid.
+Rejected whichever engine is picked.
 
-Consolidate on Typesense and drop Meilisearch
-=============================================
+Meilisearch alone makes the platform's high-availability story depend on a
+BUSL-1.1 licence, which is the same failure mode the move off Elasticsearch was
+meant to avoid. Typesense alone forces a change on every operator currently
+running Meilisearch, to solve a problem only some of them have. Either way the
+platform would be back to one vendor's licensing decisions being everyone's
+problem, which is the condition that produced this ADR.
 
-Equally simple, and rejected for the mirror-image reason: it would force a
-change on every operator currently running Meilisearch to solve a problem only
-some of them have. Supporting both is the price of not doing that to either
-group.
+Supporting more than one engine is the price of not doing that to either group,
+and the cost is bounded because they are the same shape.
 
 Implement search logic on the backend and proxy from the LMS
 ============================================================
