@@ -48,12 +48,13 @@ swap out later if this experiment doesn't pan out." Its status is still
 **Draft**. It was never accepted.
 
 The isolation it asked for was largely achieved. Counting engine references
-across the app: ``api.py`` holds 105 and is where essentially all engine
+across the app: ``api.py`` holds 115 and is where essentially all engine
 coupling lives; ``handlers.py`` has 21, of which 16 are the settings gate and
 the rest are prose; ``documents.py`` has 17, all prose or key-slugging helpers;
 ``tasks.py`` has 16, of which 14 are ``MeilisearchError`` in retry handling —
 the one piece of genuine coupling outside ``api.py``. ``views.py``,
-``urls.py``, ``models.py`` and ``plain_text_math.py`` have effectively none.
+``urls.py``, ``models.py`` and ``plain_text_math.py`` have two between them,
+both prose.
 
 Meanwhile ``openedx/modular-learning#245`` asked for exactly the layer this
 repo is for: "prototype a search abstraction layer for content libraries,"
@@ -94,11 +95,14 @@ available in Community Edition and were reclassified as an Enterprise feature,
 with CE 1.25–1.30 grandfathered. A capability that was open was withdrawn.
 
 This matters more here than it would elsewhere, because it is the same problem
-the platform moved to escape. That ADR's opening argument against Elasticsearch
-is that "in 2021, the license of Elasticsearch changed from Apache 2.0 to a more
-restrictive license," and that this "is problematic for many Open edX
-operators." An operator who cannot or will not take a commercial licence is
-left where they started.
+the platform moved to escape. That ADR's first stated objection to
+Elasticsearch is that "in 2021, the license of Elasticsearch changed from
+Apache 2.0 to a more restrictive license that prohibits providing 'the products
+to others as a managed service'," which is "problematic for many Open edX
+operators that use AWS and prefer to avoid any third-party services." The
+specifics differ — this is a licence on the software rather than on reselling
+it — but the position an operator ends up in is the same one, and an operator
+who cannot or will not take a commercial licence is left where they started.
 
 Typesense's clustering is not gated this way. It is GPL-3.0, and its
 Raft-backed replication is part of the ordinary self-hosted product — the same
@@ -291,7 +295,10 @@ Consequences
 
 4. Two engines must be run in CI. Testing engine integrations against mocks is
    how the forum Typesense backend shipped broken, so this is a requirement
-   rather than a nicety.
+   rather than a nicety. ``content/search``'s ADR 0001 deferred this
+   deliberately — its Decision 5 was that "for the experiment, we won't use
+   Meilisearch during tests, but we expect to add that in the future if we move
+   forward with replacing Elasticsearch completely." This is that future.
 
 5. The Authoring MFE's ``search-manager`` is written against the raw
    ``meilisearch`` JavaScript client. Reworking it behind a client seam is the
