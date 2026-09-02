@@ -1,0 +1,144 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm>8.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openedx-search"
+description = "A search engine library for Open edX Platform"
+requires-python = ">=3.12"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE*"]
+authors = [
+    {name = "Open edX Project", email = "oscm@openedx.org"},
+]
+classifiers = [
+    'Development Status :: 3 - Alpha',
+    'Framework :: Django',
+    'Framework :: Django :: 5.2',
+    'Framework :: Django :: 6.0',
+    'Intended Audience :: Developers',
+    'Natural Language :: English',
+    'Programming Language :: Python :: 3',
+    'Programming Language :: Python :: 3.12',
+]
+keywords = [
+    "Python",
+    "Open edX",
+]
+
+dynamic = ["readme", "version"]
+
+dependencies = [
+    "Django",
+    "openedx-atlas",
+]
+
+[project.urls]
+Homepage = "https://github.com/openedx/openedx-search"
+Repository = "https://github.com/openedx/openedx-search"
+
+[dependency-groups]
+test-base = [
+    "pytest-cov",
+    "pytest-django",
+    "code-annotations",
+    "edx-django-utils",
+    "django-extensions",
+]
+# Current default Django version used by quality, docs, and the default test
+# matrix entry. When adding or retiring a Django version from the matrix, see
+# docs/how-tos/adding-a-matrix-dependency.rst for the full process.
+test = [
+    {include-group = "test-base"},
+    "Django>=5.0,<6.0",
+]
+django60 = [
+    {include-group = "test-base"},
+    "Django>=6.0,<7.0",
+]
+quality = [
+    {include-group = "test"},
+    "edx-lint",
+    "isort",
+    "pycodestyle",
+    "pydocstyle",
+]
+doc = [
+    {include-group = "test"},
+    "doc8",
+    "sphinx-book-theme",
+    "twine",
+    "build",
+    "Sphinx",
+]
+ci = [
+    "tox",
+    "tox-uv",
+]
+dev = [
+    {include-group = "quality"},
+    {include-group = "ci"},
+    "diff-cover",
+    "edx-i18n-tools",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+readme = {file = ["README.md"], content-type = "text/markdown" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.semantic_release]
+# We use SETUPTOOLS_SCM_PRETEND_VERSION to pull the version from python-semantic-release instead
+# of actually pulling it from version control because the build step happens before the repo gets
+# tagged. Setuptools by default doesn't have any way of overriding the version number at build
+# time without a setup.py file.  This is a fine alternative that reduces the amount of boilerplate
+# code and files we need in this repo.
+build_command = "pip install build && SETUPTOOLS_SCM_PRETEND_VERSION=$NEW_VERSION python -m build"
+
+[tool.semantic_release.commit_parser_options]
+# Because this repo is meant to be an example, docs changes are relevant
+# feature changes and so should produces new releases.
+minor_tags = ["feat", "docs"]
+# If we change the build system, we want to publish it so that updates to the
+# build and release system are validated close to when they are merged.
+patch_tags = ["fix", "perf", "build"]
+
+[tool.setuptools_scm]
+# The root for the gith repo is one directory up.
+root = ".."
+version_scheme = 'only-version'
+local_scheme = 'no-local-version'
+
+# Dummy version number for when ../.git isn't accessible.
+# This happens, for example, when bind-mounting into a Docker image.
+fallback_version = "0.0.0.dev0"
+
+[tool.uv]
+# Each entry lists groups with mutually exclusive version requirements so uv can
+# produce a single uv.lock that contains a separate resolution for each. Add a
+# new pair here whenever you add a legacy-version group to [dependency-groups].
+# See docs/how-tos/adding-a-matrix-dependency.rst for the full process.
+conflicts = [
+    [{group = "test"}, {group = "django60"}],
+]
+#  DO NOT EDIT constraint-dependencies DIRECTLY.
+#  This list is managed by `edx_lint write_uv_constraints`
+#  and will be overwritten the next time `make upgrade` is run.
+#  - GLOBAL constraints: edit edx_lint/files/common_constraints.txt
+#  - REPO-SPECIFIC constraints: edit [tool.edx_lint].uv_constraints in this file
+constraint-dependencies = [
+    "Django<7.0",
+    "elasticsearch<7.14.0",
+]
+
+[tool.edx_lint]
+# Repo-specific uv constraints merged with edx-lint's global constraints.
+# Local entries override global ones for the same package.
+# Run `make upgrade` to regenerate [tool.uv].constraint-dependencies.
+uv_constraints = [
+    "Django<7.0",  # this repo tests against Django 6.x; overrides the global Django<6.0 constraint
+]

@@ -1,0 +1,268 @@
+"""
+Views for the openedx_search app.
+"""
+
+import logging
+
+from django.utils import timezone
+from django_filters import rest_framework as django_filters
+from django_filters.rest_framework import DjangoFilterBackend
+from opaque_keys import InvalidKeyError
+from opaque_keys.edx.keys import CourseKey
+from rest_framework import filters, permissions, viewsets
+from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.throttling import UserRateThrottle
+
+from openedx_search.models import CourseArchiveStatus
+from openedx_search.serializers import CourseArchiveStatusSerializer
+
+logger = logging.getLogger(__name__)
+
+
+class IsOwnerOrStaffSuperuser(permissions.BasePermission):
+    """
+    Custom permission to only allow owners of an object or staff/superusers to view or edit it.
+    """
+
+    def has_permission(self, request, view):
+        """
+        Return True if permission is granted to the view.
+        """
+        # Allow authenticated users to list and create
+        return request.user and request.user.is_authenticated
+
+    def has_object_permission(self, request, view, obj):
+        """
+        Return True if permission is granted to the object.
+        """
+        # Allow if the object belongs to the requesting user
+        if obj.user == request.user:
+            return True
+
+        # Allow staff users and superusers
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+
+        return False
+
+
+class CourseArchiveStatusPagination(PageNumberPagination):
+    """
+    Pagination class for CourseArchiveStatus.
+    """
+
+    page_size = 20
+    page_size_query_param = "page_size"
+    max_page_size = 100
+
+
+class CourseArchiveStatusThrottle(UserRateThrottle):
+    """
+    Throttle for the CourseArchiveStatus API.
+    """
+
+    rate = "60/minute"
+
+
+class CourseArchiveStatusFilterSet(django_filters.FilterSet):
+    """
+    FilterSet for CourseArchiveStatus.
+
+    The model stores a FK to CourseRun, but the public API filters and orders
+    by the course_key string (never by the internal CourseRun PK).
+    """
+
+    # Map ?course_id=course-v1:... onto the FK's course_key column.
+    course_id = django_filters.CharFilter(field_name="course_run__course_key")
+
+    # Expose ?ordering=course_id (and other fields) without leaking the
+    # double-underscore FK lookup path.
+    ordering = django_filters.OrderingFilter(
+        fields=(
+            ("course_run__course_key", "course_id"),
+            ("user", "user"),
+            ("is_archived", "is_archived"),
+            ("archive_date", "archive_date"),
+            ("created_at", "created_at"),
+            ("updated_at", "updated_at"),
+        )
+    )
+
+    class Meta:
+        """
+        FilterSet Meta options for CourseArchiveStatus.
+        """
+
+        model = CourseArchiveStatus
+        fields = ["course_id", "user", "is_archived"]
+
+
+class CourseArchiveStatusViewSet(viewsets.ModelViewSet):
+    """
+    API viewset for CourseArchiveStatus.
+
+    Allows users to view their own course archive statuses and staff/superusers to view all.
+    Pagination is applied with a default page size of 20 (max 100).
+    Filtering is available on course_id, user, and is_archived fields.
+    Ordering is available on all fields.
+    """
+
+    serializer_class = CourseArchiveStatusSerializer
+    permission_classes = [IsOwnerOrStaffSuperuser]
+    pagination_class = CourseArchiveStatusPagination
+    throttle_classes = [
+        CourseArchiveStatusThrottle,
+    ]
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_class = CourseArchiveStatusFilterSet
+    ordering = ["-updated_at"]
+
+    def get_queryset(self):
+        """
+        Return the queryset for this viewset.
+
+        Regular users can only see their own records.
+        Staff and superusers can see all records but with optimized queries.
+        """
+        user = self.request.user
+
+        # Validate query parameters to prevent injection
+        self._validate_query_params()
+
+        # Always use select_related to avoid N+1 queries when accessing
+        # related user and course_run (for course_key) fields.
+        base_queryset = CourseArchiveStatus.objects.select_related("user", "course_run")
+
+        if user.is_staff or user.is_superuser:
+            return base_queryset
+
+        # Regular users only see their own records
+        return base_queryset.filter(user=user)
+
+    def _validate_query_params(self):
+        """
+        Validate query parameters to prevent injection.
+        """
+        # Example validation for course_id format
+        course_id = self.request.query_params.get("course_id")
+        if course_id and not self._is_valid_course_id(course_id):
+            logger.warning(
+                "Invalid course_id in request: %s, user: %s",
+                course_id,
+                self.request.user.username,
+            )
+            raise ValidationError({"course_id": "Invalid course ID format."})
+
+    def _is_valid_course_id(self, course_id):
+        """
+        Check if the course_id is in a valid format.
+
+        This is a basic implementation - in production, you might use a more
+        sophisticated validator from the edx-platform.
+        """
+        try:
+            CourseKey.from_string(course_id)
+            return True
+        except InvalidKeyError:
+            return False
+
+    def perform_create(self, serializer):
+        """
+        Perform creation of a new CourseArchiveStatus.
+
+        Validates permission for user override and sets archive_date if needed.
+        """
+        # Check if user was explicitly provided and differs from current user
+        if "user" in self.request.data:
+            requested_user_id = self.request.data["user"]
+            if requested_user_id != self.request.user.id and not (
+                self.request.user.is_staff or self.request.user.is_superuser
+            ):
+                logger.warning(
+                    "Permission denied: User %s tried to create a record for user %s",
+                    self.request.user.username,
+                    requested_user_id,
+                )
+                raise PermissionDenied(
+                    "You do not have permission to create records for other users."
+                )
+
+        # Set archive_date if is_archived is True
+        data = {}
+        if serializer.validated_data.get("is_archived", False):
+            data["archive_date"] = timezone.now()
+
+        # Create the record
+        instance = serializer.save(**data)
+
+        # Log at debug level for normal operation
+        logger.debug(
+            "CourseArchiveStatus created: course_id=%s, user=%s, is_archived=%s",
+            instance.course_run.course_key,
+            instance.user.username,
+            instance.is_archived,
+        )
+
+        return instance
+
+    def perform_update(self, serializer):
+        """
+        Perform update of an existing CourseArchiveStatus.
+
+        Validates permission for user override and updates archive_date if needed.
+        """
+        instance = serializer.instance
+
+        # Check if user was explicitly provided and differs from current user
+        if "user" in self.request.data:
+            requested_user_id = self.request.data["user"]
+            if requested_user_id != self.request.user.id and not (
+                self.request.user.is_staff or self.request.user.is_superuser
+            ):
+                logger.warning(
+                    "Permission denied: User %s tried to update a record for user %s",
+                    self.request.user.username,
+                    requested_user_id,
+                )
+                raise PermissionDenied(
+                    "You do not have permission to update records for other users."
+                )
+
+        # Handle archive_date if is_archived changes
+        data = {}
+        if "is_archived" in serializer.validated_data:
+            # If changing from not archived to archived
+            if serializer.validated_data["is_archived"] and not instance.is_archived:
+                data["archive_date"] = timezone.now()
+            # If changing from archived to not archived
+            elif not serializer.validated_data["is_archived"] and instance.is_archived:
+                data["archive_date"] = None
+
+        # Update the record
+        updated_instance = serializer.save(**data)
+
+        # Log at debug level
+        logger.debug(
+            "CourseArchiveStatus updated: course_id=%s, user=%s, is_archived=%s",
+            updated_instance.course_run.course_key,
+            updated_instance.user.username,
+            updated_instance.is_archived,
+        )
+
+        return updated_instance
+
+    def perform_destroy(self, instance):
+        """
+        Perform deletion of an existing CourseArchiveStatus.
+        """
+        # Log at debug level before deletion
+        logger.debug(
+            "CourseArchiveStatus deleted: course_id=%s, user=%s, by=%s",
+            instance.course_run.course_key,
+            instance.user.username,
+            self.request.user.username,
+        )
+
+        # Delete the instance
+        return super().perform_destroy(instance)
